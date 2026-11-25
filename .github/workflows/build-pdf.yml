@@ -1,4 +1,4 @@
-name: Build LearnCpp PDF
+name: Build LearnCpp Markdown
 
 on:
   workflow_dispatch:
@@ -6,73 +6,61 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Show runner location and test LearnCpp
+      - name: Instalar dependencias
         run: |
-          curl -s https://ifconfig.co/country || true
-          curl -I https://www.learncpp.com || true
+          pip install cloudscraper beautifulsoup4 markdownify
 
-      - name: Install base system dependencies
+      - name: Descargar y convertir a Markdown
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git \
-            make \
-            curl \
-            poppler-utils \
-            fonts-dejavu \
-            fonts-liberation
+          cat << 'EOF' > scraper.py
+          import os, time, re, cloudscraper
+          from bs4 import BeautifulSoup
+          from markdownify import markdownify as md
 
-      - name: Install pixi
-        run: |
-          curl -fsSL https://pixi.sh/install.sh | bash
-          echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
+          scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
+          os.makedirs("learncpp_md", exist_ok=True)
 
-      - name: Install Python dependencies
-        run: |
-          pixi install
+          def limpiar(texto):
+              return re.sub(r'[\\/*?:"<>|]', "", texto).strip().replace(" ", "_")
 
-      - name: Install Chromium for Playwright
-        run: |
-          pixi run python -m playwright install --with-deps chromium
+          print("Descargando índice...")
+          resp = scraper.get("https://www.learncpp.com/")
+          soup = BeautifulSoup(resp.text, "html.parser")
+          capitulos = soup.find_all("div", class_="lessontable")
 
-      - name: Create .env
-        run: |
-          cat > .env <<'EOF'
-          DOWNLOAD_CONCURRENT_MAX=3
-          DOWNLOAD_CONTENT_RETRY=10
-          COMPUTE_PROCESS_MAX=2
-          COMPUTE_PROCESS_TIMEOUT=300
-          PDF_CONVERTION_MAX_RETRY=5
-          PLAYWRIGHT_TIMEOUT_MS=120000
-          BOOK_NAME=learncpp.pdf
-          REMOVE_CACHE_ON_SUCCESS=False
+          for idx, cap in enumerate(capitulos):
+              header = cap.find("div", class_="lessontable-header")
+              titulo_cap = header.get_text(strip=True) if header else f"Capitulo_{idx}"
+              enlaces = [a for a in cap.find_all("a", href=True) if "learncpp.com/cpp-tutorial/" in a["href"]]
+              if not enlaces:
+                  continue
+
+              ruta = os.path.join("learncpp_md", f"{idx:02d}_{limpiar(titulo_cap)[:45]}.md")
+              print(f"Procesando {titulo_cap} ({len(enlaces)} lecciones)...")
+              
+              with open(ruta, "w", encoding="utf-8") as f:
+                  f.write(f"# {titulo_cap}\n\n")
+                  for a in enlaces:
+                      url = a["href"]
+                      titulo_lec = a.get_text(strip=True)
+                      try:
+                          r = scraper.get(url)
+                          s = BeautifulSoup(r.text, "html.parser")
+                          contenido = s.find("div", class_="entry-content")
+                          if contenido:
+                              for basura in contenido.find_all("div", class_=["prevnext", "code-block", "cf_monitor"]):
+                                  basura.decompose()
+                              texto_md = md(str(contenido), heading_style="ATX", code_language="cpp")
+                              f.write(f"\n---\n## {titulo_lec}\nFuente: {url}\n\n{texto_md}\n\n")
+                          time.sleep(0.5)
+                      except Exception as e:
+                          print(f"Error en {url}: {e}")
           EOF
+          python scraper.py
 
-      - name: Build PDF
-        run: |
-          pixi run python -m book
-
-      - name: Inspect generated PDF
-        if: always()
-        run: |
-          ls -lh learncpp.pdf || true
-          pdfinfo learncpp.pdf | grep -E "Pages|Encrypted|Tagged|Producer|Creator" || true
-          pdftotext -f 1 -l 1 learncpp.pdf - | head -80 || true
-          pdftotext -f 500 -l 505 learncpp.pdf - | head -80 || true
-          pdffonts learncpp.pdf | head -80 || true
-          pdfimages -f 1 -l 1 -list learncpp.pdf | head -40 || true
-
-      - name: Upload PDF artifact
+      - name: Subir archivos Markdown
         uses: actions/upload-artifact@v4
         with:
-          name: learncpp-pdf
-          path: |
-            learncpp.pdf
-            .tmp/**/*.pdf
-            .tmp/error
+          name: learncpp-markdown
+          path: learncpp_md/
